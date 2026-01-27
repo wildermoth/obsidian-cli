@@ -1,5 +1,7 @@
 import json
 import os
+import shutil
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -170,12 +172,63 @@ def collect_frontmatter(vault_path: str) -> list[dict]:
     return notes
 
 
+def fzf_pick_note(vault_path: str) -> str | None:
+    if shutil.which("fzf") is None:
+        print("Error: fzf not found in PATH")
+        return None
+    entries = []
+    for note in iter_notes_fast(vault_path):
+        title = note.title.replace("\t", " ").replace("\n", " ").strip()
+        entries.append((title, note.filepath))
+    if not entries:
+        print("No markdown files found")
+        return None
+    lines = [f"{title}\t{path}" for title, path in entries]
+    preview_cmd = "sed -n '1,120p' {2} 2>/dev/null"
+    if shutil.which("bat") is not None:
+        preview_cmd = "bat --style=plain --color=always --line-range 1:120 {2} 2>/dev/null"
+
+    proc = subprocess.run(
+        [
+            "fzf",
+            "--delimiter=\t",
+            "--with-nth=1",
+            "--preview",
+            preview_cmd,
+        ],
+        input="\n".join(lines),
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    if proc.returncode != 0:
+        return None
+    selection = proc.stdout.strip()
+    if not selection:
+        return None
+    try:
+        _, path_str = selection.split("\t", 1)
+        return path_str
+    except ValueError:
+        return None
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Parse frontmatter quickly (no YAML).")
     parser.add_argument("vault_path", help="Path to the Obsidian vault")
+    parser.add_argument(
+        "--fzf",
+        action="store_true",
+        help="Pick a note title via fzf and open in nvim",
+    )
     args = parser.parse_args()
+
+    if args.fzf:
+        selected = fzf_pick_note(args.vault_path)
+        if selected:
+            subprocess.run(["nvim", selected])
+        raise SystemExit(0)
 
     start_time = time.perf_counter()
     notes = collect_frontmatter(args.vault_path)

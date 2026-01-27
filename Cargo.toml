@@ -1,0 +1,12 @@
+[package]
+name = "obsidian_cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+memchr = "2.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+yaml-rust2 = "0.8"
+saphyr = "0.0.6"
+ryml = "0.3.2"

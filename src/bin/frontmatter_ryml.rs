@@ -1,6 +1,8 @@
 use obsidian_cli::frontmatter::{parse_cli_args, run_cli, want_field, FieldKind, Fields};
 use ryml::Tree;
+use std::borrow::Cow;
 
+#[inline]
 fn trim_val(val: &str) -> Option<String> {
     let trimmed = val.trim();
     if trimmed.is_empty() {
@@ -10,14 +12,22 @@ fn trim_val(val: &str) -> Option<String> {
     }
 }
 
-fn extract_fields_min(yaml_bytes: &[u8]) -> Option<Fields> {
+fn extract_fields_min(yaml_bytes: &[u8], scratch: &mut String) -> Option<Fields> {
     if yaml_bytes.is_empty() || yaml_bytes.iter().all(|b| b.is_ascii_whitespace()) {
         return None;
     }
-    let mut yaml = String::from_utf8_lossy(yaml_bytes).into_owned();
-    let tree = Tree::parse_in_place(&mut yaml).ok()?;
-    let root = tree.root_ref().ok()?;
-    if !root.is_map().ok()? {
+    match String::from_utf8_lossy(yaml_bytes) {
+        Cow::Borrowed(text) => {
+            scratch.clear();
+            scratch.push_str(text);
+        }
+        Cow::Owned(text) => {
+            *scratch = text;
+        }
+    }
+    let tree = Tree::parse_in_place(scratch).ok()?;
+    let root_id = tree.root_id().ok()?;
+    if !tree.is_map(root_id).ok()? {
         return None;
     }
 
@@ -28,58 +38,70 @@ fn extract_fields_min(yaml_bytes: &[u8]) -> Option<Fields> {
         aliases: Vec::new(),
     };
 
-    for child in root.iter().ok()? {
-        if !child.has_key().ok()? {
-            continue;
-        }
-        let key = child.key().ok()?;
-        let key = key.trim();
-        let Some((field, score)) = want_field(key) else {
-            continue;
-        };
+    let mut aliases_seen = false;
+    let mut child = tree.first_child(root_id).ok()?;
 
-        match field {
-            FieldKind::Aliases => {
-                if child.is_seq().ok()? {
-                    for item in child.iter().ok()? {
-                        if let Ok(val) = item.val() {
-                            if let Some(value) = trim_val(val) {
-                                fields.aliases.push(value);
+    while child != ryml::NONE {
+        if tree.has_key(child).ok()? {
+            let key = tree.key(child).ok()?;
+            let key = key.trim();
+            if let Some((field, score)) = want_field(key) {
+                match field {
+                    FieldKind::Aliases => {
+                        if tree.is_seq(child).ok()? {
+                            let mut item = tree.first_child(child).ok()?;
+                            while item != ryml::NONE {
+                                if !tree.is_container(item).ok()? {
+                                    if let Ok(val) = tree.val(item) {
+                                        if let Some(value) = trim_val(val) {
+                                            fields.aliases.push(value);
+                                        }
+                                    }
+                                }
+                                item = tree.next_sibling(item).ok()?;
+                            }
+                        } else if !tree.is_container(child).ok()? {
+                            if let Ok(val) = tree.val(child) {
+                                if let Some(value) = trim_val(val) {
+                                    fields.aliases.push(value);
+                                }
+                            }
+                        }
+                        aliases_seen = true;
+                    }
+                    FieldKind::DateCreated => {
+                        let mut should_update = true;
+                        if let Some(current_score) = fields.date_score {
+                            if score < current_score {
+                                should_update = false;
+                            }
+                        }
+                        if should_update && !tree.is_container(child).ok()? {
+                            if let Ok(val) = tree.val(child) {
+                                if let Some(value) = trim_val(val) {
+                                    fields.date_created = Some(value);
+                                    fields.date_score = Some(score);
+                                }
                             }
                         }
                     }
-                } else if child.has_val().ok()? {
-                    if let Ok(val) = child.val() {
-                        if let Some(value) = trim_val(val) {
-                            fields.aliases.push(value);
+                    FieldKind::Title => {
+                        if fields.title.is_none() && !tree.is_container(child).ok()? {
+                            if let Ok(val) = tree.val(child) {
+                                if let Some(value) = trim_val(val) {
+                                    fields.title = Some(value);
+                                }
+                            }
                         }
                     }
                 }
             }
-            FieldKind::DateCreated => {
-                if let Some(current_score) = fields.date_score {
-                    if score < current_score {
-                        continue;
-                    }
-                }
-                if child.has_val().ok()? {
-                    if let Ok(val) = child.val() {
-                        if let Some(value) = trim_val(val) {
-                            fields.date_created = Some(value);
-                            fields.date_score = Some(score);
-                        }
-                    }
-                }
-            }
-            FieldKind::Title => {
-                if fields.title.is_none() && child.has_val().ok()? {
-                    if let Ok(val) = child.val() {
-                        if let Some(value) = trim_val(val) {
-                            fields.title = Some(value);
-                        }
-                    }
-                }
-            }
+        }
+
+        child = tree.next_sibling(child).ok()?;
+
+        if fields.title.is_some() && fields.date_score == Some(2) && aliases_seen {
+            break;
         }
     }
 
@@ -95,6 +117,9 @@ fn main() {
         }
     };
 
-    run_cli("frontmatter_ryml", &vault_path, options, extract_fields_min);
+    let mut scratch = String::new();
+    run_cli("frontmatter_ryml", &vault_path, options, |yaml_bytes| {
+        extract_fields_min(yaml_bytes, &mut scratch)
+    });
     let _ = program;
 }
